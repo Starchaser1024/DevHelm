@@ -1,0 +1,68 @@
+.pageTitle {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-bottom: var(--space-5);
+  margin-bottom: var(--space-6);
+  border-bottom: 1px solid var(--border);
+}
+
+.pageTitleHeading {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-2xl);
+  font-weight: 500;
+  letter-spacing: var(--tracking-display);
+  line-height: var(--leading-display);
+  color: var(--foreground);
+}
+
+.pageTitleDescription {
+  margin: 0;
+  max-width: 68ch;
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  color: var(--text-secondary);
+}
+
+.card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-surface);
+  background: var(--surface);
+  padding: var(--space-6);
+}
+
+.cardFlush {
+  padding: 0;
+  overflow: hidden;
+}
+
+/* 列表项 / 次要操作：整行可点，左对齐 */
+.listItem {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  font: inherit;
+  font-size: var(--text-sm);
+  color: var(--foreground);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
+}
+
+.listItem:hover {
+  background: var(--surface-muted);
+}
+
+/* 选中态：accent 只用于“被选中的行”，与 Arc 的用色规则一致 */
+.listItemActive,
+.listItemActive:hover {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}

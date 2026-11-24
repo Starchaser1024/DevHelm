@@ -1,0 +1,180 @@
+"use client";
+
+import { Check, LoaderCircle, ThumbsDown, ThumbsUp, X } from "lucide-react";
+import { useEffect, useState } from "react";
+
+import { Button } from "@/components/arc/button/button";
+import { apiPost } from "@/lib/api";
+
+export type ChatFeedbackRecord = {
+  id: string;
+  repo_id: string;
+  conversation_id: string;
+  assistant_message_id: string;
+  run_id?: string | null;
+  rating: "helpful" | "unhelpful";
+  reason?: FeedbackReason | null;
+  comment?: string | null;
+  review_status: "open" | "in_review" | "resolved" | "dismissed";
+  notification_status: string;
+  notification_error?: string | null;
+};
+
+type FeedbackReason =
+  | "inaccurate"
+  | "not_relevant"
+  | "missing_context"
+  | "unreliable_citation"
+  | "tool_error"
+  | "other";
+
+type FeedbackControlsProps = {
+  repoId: string;
+  conversationId: string;
+  messageId: string;
+  initialFeedback?: ChatFeedbackRecord;
+  onSaved: (feedback: ChatFeedbackRecord) => void;
+};
+
+const REASONS: Array<{ value: FeedbackReason; label: string }> = [
+  { value: "inaccurate", label: "内容不准确" },
+  { value: "not_relevant", label: "没有解决问题" },
+  { value: "missing_context", label: "缺少关键上下文" },
+  { value: "unreliable_citation", label: "引用不可靠" },
+  { value: "tool_error", label: "工具执行异常" },
+  { value: "other", label: "其他" }
+];
+
+export function FeedbackControls({
+  repoId,
+  conversationId,
+  messageId,
+  initialFeedback,
+  onSaved
+}: FeedbackControlsProps) {
+  const [feedback, setFeedback] = useState(initialFeedback);
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [reason, setReason] = useState<FeedbackReason | undefined>(initialFeedback?.reason ?? undefined);
+  const [comment, setComment] = useState(initialFeedback?.comment ?? "");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setFeedback(initialFeedback);
+    setReason(initialFeedback?.reason ?? undefined);
+    setComment(initialFeedback?.comment ?? "");
+  }, [initialFeedback]);
+
+  async function submit(rating: "helpful" | "unhelpful") {
+    setPending(true);
+    setError("");
+    try {
+      const result = await apiPost<ChatFeedbackRecord>("/api/chat/feedback", {
+        repo_id: repoId,
+        conversation_id: conversationId,
+        assistant_message_id: messageId,
+        rating,
+        reason: rating === "unhelpful" ? reason : null,
+        comment: rating === "unhelpful" ? comment.trim() || null : null
+      });
+      setFeedback(result);
+      setPanelOpen(false);
+      onSaved(result);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "反馈提交失败");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="mt-3 border-t border-line pt-2">
+      <div className="flex min-h-8 items-center gap-1">
+        <button
+          type="button"
+          title="回答有帮助"
+          aria-label="回答有帮助"
+          aria-pressed={feedback?.rating === "helpful"}
+          disabled={pending}
+          onClick={() => void submit("helpful")}
+          className={`flex h-8 w-8 items-center justify-center rounded-control transition disabled:cursor-not-allowed disabled:opacity-50 ${
+            feedback?.rating === "helpful" ? "bg-success-subtle text-success" : "text-ink-2 hover:bg-panel hover:text-ink"
+          }`}
+        >
+          {pending && !panelOpen ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <ThumbsUp className="h-4 w-4" />}
+        </button>
+        <button
+          type="button"
+          title="回答没帮助"
+          aria-label="回答没帮助"
+          aria-pressed={feedback?.rating === "unhelpful"}
+          disabled={pending}
+          onClick={() => {
+            setPanelOpen(true);
+            setError("");
+          }}
+          className={`flex h-8 w-8 items-center justify-center rounded-control transition disabled:cursor-not-allowed disabled:opacity-50 ${
+            feedback?.rating === "unhelpful" ? "bg-danger-subtle text-danger" : "text-ink-2 hover:bg-panel hover:text-ink"
+          }`}
+        >
+          <ThumbsDown className="h-4 w-4" />
+        </button>
+        {feedback && !panelOpen && (
+          <span className="ml-1 flex min-w-0 items-center gap-1 text-xs text-ink-2">
+            <Check className="h-3.5 w-3.5 shrink-0 text-success" />
+            已记录
+            {feedback.run_id && <span className="truncate font-mono text-[11px]">trace {feedback.run_id.slice(0, 8)}</span>}
+          </span>
+        )}
+      </div>
+
+      {panelOpen && (
+        <div className="mt-2 max-w-xl rounded-panel border border-line bg-panel p-3">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-xs font-medium text-ink">这条回答哪里需要改进？</span>
+            <button
+              type="button"
+              title="关闭"
+              aria-label="关闭反馈"
+              onClick={() => setPanelOpen(false)}
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-control text-ink-2 transition hover:bg-surface hover:text-ink"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {REASONS.map((item) => (
+              <button
+                key={item.value}
+                type="button"
+                aria-pressed={reason === item.value}
+                onClick={() => setReason(item.value)}
+                className={`rounded-control border px-2.5 py-1 text-xs transition ${
+                  reason === item.value
+                    ? "border-accent bg-accent-subtle text-accent-strong"
+                    : "border-line bg-surface text-ink-2 hover:border-line-strong"
+                }`}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          <textarea
+            value={comment}
+            maxLength={1000}
+            rows={2}
+            onChange={(event) => setComment(event.target.value)}
+            placeholder="补充说明（可选）"
+            className="mt-2 w-full resize-y rounded-control border border-line bg-surface px-3 py-2 text-xs leading-5 text-ink outline-none transition focus:border-accent focus:ring-2 focus:ring-accent-subtle"
+          />
+          <div className="mt-2 flex items-center justify-between gap-3">
+            <span className="text-xs text-danger">{error}</span>
+            <Button type="button" variant="primary" size="sm" loading={pending} onClick={() => void submit("unhelpful")}>
+              提交反馈
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
