@@ -39,12 +39,12 @@ safety_level: read_only
 
 ## 工作流
 
-1. 收集 PR 标题、正文、变更文件、patch 和 Review 评论。
+1. 收集 PR 标题、正文、变更文件、patch、Review 评论、CI 状态、关联文档/Issue 与可选的 `change-verifier` 行为验收报告。
 2. 用维护者能快速理解的语言总结实现变化。
-3. 按 P1/P2/P3 输出 `review_findings`，每条都要有证据、需要动作和是否阻塞。
-4. P1/P2 必须进入 `blocking_issues`，且不能给出「建议合入」。
-5. 标出风险点和需要重点关注的文件。
-6. 给出与变更面匹配的测试建议。
+3. 为每条审查结论绑定可定位的结构化证据引用 `citations`（`diff` 行号锚点、`ci` 运行记录、`issue`、`doc` 摘要与 `stale` 过期标记、`acceptance_report` 检查项）。
+4. 将结论明确归入三类桶：**阻塞问题（`blocking_findings`）**、**一般建议（`advisory_findings`）**、**证据不足项（`evidence_gaps`）**。
+5. P1/P2 必须进入 `blocking_issues`，且不能给出「建议合入」；若无阻塞问题但存在 `evidence_gaps`（如 `unverifiable` 检查项、草稿验收规则或过期手册），合入建议降级为「暂缓」。
+6. 给出与变更面匹配的测试与验收建议。
 
 ## 分级标准
 

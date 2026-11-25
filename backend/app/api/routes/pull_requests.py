@@ -1,6 +1,7 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -8,12 +9,19 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, selectinload
 
-from app.db.models import AnalysisResult, CodeRelation, CodeSymbol, Conversation, Document, PullRequest, Repository, WorkflowRun
+from app.db.models import AnalysisResult, CodeRelation, CodeSymbol, Conversation, Document, PullRequest, Repository, User, WorkflowRun
 from app.db.session import get_db
-from app.schemas.pull_requests import PRAnalysisResponse, PullRequestResponse
+from app.schemas.pull_requests import (
+    AcceptanceReportIngestRequest,
+    AcceptanceReportResponse,
+    PRAnalysisResponse,
+    PullRequestResponse,
+)
 from app.services.agents.pr_review_agent import PRReviewAgent
 from app.services.chat_memory import ContextAssembler
 from app.services.code_search import search_repository_code
+from app.services.permissions import require_permission
+from app.services.pr_acceptance import get_latest_pr_acceptance_report, ingest_pr_acceptance_report
 from app.services.rag.retrieval import search_similar_documents
 from app.services.worktree_manager import cleanup_pr_snapshots, prepare_pr_worktree
 
@@ -207,6 +215,7 @@ def _build_pr_analysis_context(db: Session, pr: PullRequest, conversation_id: UU
         for name in file_names
         if any(token in name.lower() for token in ["auth", "security", "migration", "schema", "payment", "permission", "config", "ci", "workflow"])
     ]
+    latest_acceptance = get_latest_pr_acceptance_report(db, pr.id)
     context = {
         "repo_id": str(pr.repo_id),
         "plan": _pr_review_plan(),
@@ -225,10 +234,17 @@ def _build_pr_analysis_context(db: Session, pr: PullRequest, conversation_id: UU
             "recent_runs": len(recent_runs),
             "failed_runs": len(failed_runs),
             "failed": [
-                {"name": run.name, "conclusion": run.conclusion, "logs_text": (run.logs_text or "")[:260]}
+                {
+                    "id": str(run.id),
+                    "run_id": f"run-{run.github_run_id}" if run.github_run_id else f"run-{str(run.id)[:8]}",
+                    "name": run.name,
+                    "conclusion": run.conclusion,
+                    "logs_text": (run.logs_text or "")[:260],
+                }
                 for run in failed_runs[:4]
             ],
         },
+        "acceptance_report": latest_acceptance.model_dump(mode="json") if latest_acceptance else None,
         "team_members": team_members,
     }
     counts = {
@@ -239,6 +255,7 @@ def _build_pr_analysis_context(db: Session, pr: PullRequest, conversation_id: UU
         "issues": len(related_issues),
         "conversation": len(chat_evidence),
         "failed_ci": len(failed_runs),
+        "acceptance_checks": latest_acceptance.summary.total_checks if latest_acceptance else 0,
         "team_members": len(team_members),
     }
     return code_query, context, counts
@@ -364,6 +381,7 @@ def _persist_pr_analysis(
         },
         result_json=result,
         model_name=model_name,
+        created_at=datetime.now(UTC),
     )
     db.add(analysis)
     db.commit()
@@ -411,6 +429,25 @@ async def _stream_public_reasoning(agent: PRReviewAgent, pr: PullRequest, payloa
         yield line
 
 
+def _build_evidence_summary(context: dict, counts: dict) -> dict:
+    ci_summary = context.get("ci_summary") or {}
+    acceptance = context.get("acceptance_report") or {}
+    return {
+        "diff_stats": context.get("diff_stats") or {},
+        "ci_status": {
+            "recent_runs": int(ci_summary.get("recent_runs") or 0),
+            "failed_runs": int(ci_summary.get("failed_runs") or 0),
+            "state": "failed"
+            if int(ci_summary.get("failed_runs") or 0) > 0
+            else ("passed" if int(ci_summary.get("recent_runs") or 0) > 0 else "missing"),
+        },
+        "linked_issues": int(counts.get("issues") or 0),
+        "linked_documents": int(counts.get("documents") or 0),
+        "review_comments": int(counts.get("comments") or 0),
+        "acceptance_summary": acceptance.get("summary") if isinstance(acceptance, dict) else None,
+    }
+
+
 async def _pr_analysis_sse(pr_id: UUID, conversation_id: UUID | None, db: Session) -> AsyncIterator[str]:
     pr = db.query(PullRequest).options(selectinload(PullRequest.files), selectinload(PullRequest.review_comments)).filter(PullRequest.id == pr_id).one_or_none()
     if pr is None:
@@ -436,15 +473,16 @@ async def _pr_analysis_sse(pr_id: UUID, conversation_id: UUID | None, db: Sessio
         context["plan"] = plan
         yield _encode_sse("trace", _trace_item("tool", "执行 2/6：拆分 diff 风险", f"扫描 {counts['files']} 个文件，识别敏感文件 {len((context.get('diff_stats') or {}).get('sensitive_files') or [])} 个。"))
         yield _encode_sse("trace", _trace_item("tool", "执行 3/6：读取代码和测试", f"找到 {counts['code']} 条代码线索，其中 PR 快照代码 {counts.get('snapshot_code', 0)} 条；项目文档/记忆线索 {counts['documents']} 条。"))
-        yield _encode_sse("trace", _trace_item("tool", "执行 4/6：检查 CI", f"读取最近 CI 信号，失败 run 数量：{counts['failed_ci']}。"))
+        yield _encode_sse("trace", _trace_item("tool", "执行 4/6：检查 CI 与行为验收", f"读取最近 CI 信号（失败 {counts['failed_ci']} 个），行为验收检查项 {counts.get('acceptance_checks', 0)} 个。"))
         yield _encode_sse("trace", _trace_item("tool", "执行 5/6：检索上下文", f"找到 {counts['issues']} 条历史 Issue、{counts['conversation']} 条会话证据、{counts['comments']} 条 review comment。"))
-        yield _encode_sse("trace", _trace_item("thinking", "LLM 公开执行过程", "开始综合 PR diff、代码、CI、文档和 review comment。", "running"))
+        yield _encode_sse("trace", _trace_item("thinking", "LLM 公开执行过程", "开始综合 PR diff、代码、CI、文档、行为验收和 review comment。", "running"))
         async for chunk in _stream_public_reasoning(agent, pr, payload, context, counts):
             yield _encode_sse("thinking_delta", {"content": chunk})
         result = await agent.run(payload, context)
         analysis = _persist_pr_analysis(db, pr, result, agent.llm.model, conversation_id, counts)
-        yield _encode_sse("trace", _trace_item("result", "执行 6/6：形成合入建议", f"结论：{result.get('merge_recommendation')}；风险点：{len(result.get('risk_points') or [])}；阻塞项：{len(result.get('blocking_issues') or [])}。"))
-        yield _encode_sse("final", {"analysis_id": str(analysis.id), "result": result})
+        evidence_summary = _build_evidence_summary(context, counts)
+        yield _encode_sse("trace", _trace_item("result", "执行 6/6：形成合入建议", f"结论：{result.get('merge_recommendation')}；阻塞问题：{len(result.get('blocking_findings') or [])}；证据不足：{len(result.get('evidence_gaps') or [])}。"))
+        yield _encode_sse("final", {"analysis_id": str(analysis.id), "result": result, "evidence_summary": evidence_summary})
     except Exception as exc:
         db.rollback()
         yield _encode_sse("error", {"message": f"分析失败：{exc}"})
@@ -487,7 +525,69 @@ async def analyze_pull_request(
     _augment_pr_context_with_snapshot(db, pr, _query, context, counts, snapshot)
     result = await agent.run(_pr_payload(pr), context)
     analysis = _persist_pr_analysis(db, pr, result, agent.llm.model, conversation_id, counts)
-    return PRAnalysisResponse(analysis_id=analysis.id, result=result)
+    return PRAnalysisResponse(
+        analysis_id=analysis.id,
+        result=result,
+        evidence_summary=_build_evidence_summary(context, counts),
+    )
+
+
+@router.get("/pull-requests/{pr_id}/latest-analysis", response_model=PRAnalysisResponse)
+async def get_latest_pull_request_analysis(
+    pr_id: UUID,
+    db: Session = Depends(get_db),
+) -> PRAnalysisResponse:
+    pr = db.query(PullRequest).options(selectinload(PullRequest.files), selectinload(PullRequest.review_comments)).filter(PullRequest.id == pr_id).one_or_none()
+    if pr is None:
+        raise HTTPException(status_code=404, detail="未找到 PR")
+    row = (
+        db.query(AnalysisResult)
+        .filter(
+            AnalysisResult.target_type == "pull_request",
+            AnalysisResult.target_id == pr_id,
+            AnalysisResult.analysis_type == "pr_review",
+        )
+        .order_by(AnalysisResult.created_at.desc())
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="当前 PR 尚无分析记录")
+    _query, context, counts = _build_pr_analysis_context(db, pr)
+    return PRAnalysisResponse(
+        analysis_id=row.id,
+        result=row.result_json or {},
+        evidence_summary=_build_evidence_summary(context, counts),
+    )
+
+
+@router.post("/pull-requests/{pr_id}/acceptance-report", response_model=AcceptanceReportResponse)
+async def post_pull_request_acceptance_report(
+    pr_id: UUID,
+    payload: AcceptanceReportIngestRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_permission("agent:run")),
+) -> AcceptanceReportResponse:
+    pr = db.get(PullRequest, pr_id)
+    if pr is None:
+        raise HTTPException(status_code=404, detail="未找到 PR")
+    try:
+        return ingest_pr_acceptance_report(db, pr, payload.model_dump(mode="json"), user=user)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/pull-requests/{pr_id}/acceptance-report", response_model=AcceptanceReportResponse)
+async def get_pull_request_acceptance_report(
+    pr_id: UUID,
+    db: Session = Depends(get_db),
+) -> AcceptanceReportResponse:
+    pr = db.get(PullRequest, pr_id)
+    if pr is None:
+        raise HTTPException(status_code=404, detail="未找到 PR")
+    report = get_latest_pr_acceptance_report(db, pr_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="当前 PR 尚未关联行为验收报告")
+    return report
 
 
 @router.post("/pull-requests/{pr_id}/analyze/stream")
