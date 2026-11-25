@@ -16,6 +16,7 @@ from app.services.context_compression import (
     merge_memory,
     render_structured_memory,
 )
+from app.services.evals.pr_readiness import run_pr_merge_readiness_eval
 from app.services.evals.ragas_runner import run_rag_quality_eval
 from app.services.rag.embeddings import deterministic_embedding
 from app.services.skills import get_skill_registry
@@ -60,6 +61,7 @@ async def run_basic_eval(db: Session | None = None, repo_id: str | None = None) 
     pr_result = await pr_agent.run(pr_payload, {})
     key_text = " ".join(pr_result.get("key_changes", []) + pr_result.get("files_need_attention", []))
     pr_key_file_coverage = sum(file["filename"] in key_text for file in pr_payload["files"]) / len(pr_payload["files"])
+    pr_readiness = await run_pr_merge_readiness_eval(db, repo_id)
 
     rag_docs = [
         ("issue-login", "Login API returns 500 when token expires"),
@@ -164,6 +166,11 @@ async def run_basic_eval(db: Session | None = None, repo_id: str | None = None) 
         "",
         f"- Issue classification accuracy: {issue_accuracy:.2f}",
         f"- PR key-file coverage: {pr_key_file_coverage:.2f}",
+        f"- PR blocking precision: {pr_readiness['blocking_precision']:.2f}",
+        f"- PR false-blocking rate: {pr_readiness['false_blocking_rate']:.2f}",
+        f"- PR critical-issue recall: {pr_readiness['critical_issue_recall']:.2f}",
+        f"- PR citation binding rate: {pr_readiness['citation_binding_rate']:.2f}",
+        f"- PR stale-doc detection rate: {pr_readiness['stale_doc_detection_rate']:.2f}",
         f"- RAG hit@3: {rag_hit_rate_at_3:.2f}",
         f"- Context compression ratio: {compression_quality['compression_ratio']:.2f}",
         f"- Skill registry coverage: {skill_registry_coverage:.2f}",
@@ -194,6 +201,13 @@ async def run_basic_eval(db: Session | None = None, repo_id: str | None = None) 
     return {
         "issue_classification_accuracy": round(issue_accuracy, 4),
         "pr_key_file_coverage": round(pr_key_file_coverage, 4),
+        "pr_blocking_precision": pr_readiness["blocking_precision"],
+        "pr_false_blocking_rate": pr_readiness["false_blocking_rate"],
+        "pr_critical_issue_recall": pr_readiness["critical_issue_recall"],
+        "pr_citation_binding_rate": pr_readiness["citation_binding_rate"],
+        "pr_stale_doc_detection_rate": pr_readiness["stale_doc_detection_rate"],
+        "pr_dataset_sha256": pr_readiness["dataset_sha256"],
+        "pr_merge_readiness": pr_readiness,
         "rag_hit_rate_at_3": round(rag_hit_rate_at_3, 4),
         "tool_call_accuracy": round(tool_call_schema_ready_rate, 4),
         "skill_registry_coverage": round(skill_registry_coverage, 4),

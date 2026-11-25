@@ -1,8 +1,8 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.analysis import PRAcceptanceSummary, PRReviewOutput
 
@@ -113,3 +113,52 @@ class AcceptanceReportResponse(BaseModel):
     evidence_gap_ids: list[str] = Field(default_factory=list)
     positive_check_ids: list[str] = Field(default_factory=list)
     report: dict[str, Any] = Field(default_factory=dict)
+
+
+PRMergeVerdict = Literal["建议合入", "修改后合入", "暂缓", "拒绝"]
+PRFeedbackLabel = Literal["useful", "false_positive", "missed_issue"]
+
+
+class PRCommentDraftRequest(BaseModel):
+    analysis_id: UUID | str | None = None
+    reviewer_confirmed: bool = False
+    confirmed_merge_recommendation: PRMergeVerdict | None = None
+    confirmed_finding_ids: list[str] | None = None
+    confirmed_finding_indices: list[int] | None = None
+    confirmed_gap_ids: list[str] | None = None
+    reviewer_note: str | None = None
+
+
+class PRFeedbackCreateRequest(BaseModel):
+    label: PRFeedbackLabel
+    analysis_id: UUID | str | None = None
+    finding_id: str | None = None
+    expected_merge_recommendation: PRMergeVerdict | None = None
+    expected_blocking: bool | None = None
+    missed_issue_title: str | None = None
+    expected_locator: str | None = None
+    note: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_missed_issue_ground_truth(self) -> "PRFeedbackCreateRequest":
+        if self.label == "missed_issue":
+            has_ground_truth = bool((self.missed_issue_title or "").strip() or (self.note or "").strip())
+            if not has_ground_truth:
+                raise ValueError("标记遗漏（missed_issue）时需提供 missed_issue_title 或 note 作为期望基线说明")
+        return self
+
+
+class PRFeedbackResponse(BaseModel):
+    id: UUID | str
+    pr_id: UUID | str
+    pr_number: int
+    repo_id: UUID | str
+    analysis_id: UUID | str | None = None
+    label: PRFeedbackLabel
+    finding_id: str | None = None
+    expected_merge_recommendation: PRMergeVerdict | None = None
+    expected_blocking: bool | None = None
+    missed_issue_title: str | None = None
+    expected_locator: str | None = None
+    note: str | None = None
+    created_at: str

@@ -33,6 +33,12 @@ class EvalIssueDraftRequest(BaseModel):
     title: str | None = None
 
 
+class PRReadinessEvalRequest(BaseModel):
+    name: str = "pr_merge_readiness"
+    repo_id: UUID | None = None
+    include_feedback: bool = True
+
+
 class EvalRunResponse(BaseModel):
     eval_id: str
     status: str

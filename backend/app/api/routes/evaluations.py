@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.db.models import ActionDraft, EvalRun, Repository, User
 from app.db.session import SessionLocal, get_db
-from app.schemas.evals import EvalIssueDraftRequest, EvalRunRequest, EvalRunResponse
+from app.schemas.evals import EvalIssueDraftRequest, EvalRunRequest, EvalRunResponse, PRReadinessEvalRequest
+from app.services.evals.pr_readiness import build_pr_readiness_dataset, run_pr_merge_readiness_eval
 from app.services.evals.ragas_runner import (
     REQUIRED_RAGAS_METRICS,
     RagEvalCase,
@@ -76,6 +77,46 @@ async def run_eval(
 ) -> EvalRunResponse:
     result = await run_basic_eval(db, str(payload.repo_id) if payload.repo_id else None)
     eval_run = EvalRun(name=payload.name, result_json=result)
+    db.add(eval_run)
+    db.commit()
+    db.refresh(eval_run)
+    return EvalRunResponse(
+        eval_id=str(eval_run.id),
+        status="completed",
+        result=result,
+    )
+
+
+@router.get("/pr-regression-cases")
+async def get_pr_regression_cases(
+    repo_id: UUID | None = Query(default=None),
+    include_feedback: bool = Query(default=True),
+    db: Session = Depends(get_db),
+    _user=Depends(require_permission("eval:read")),
+) -> dict:
+    if repo_id is not None and db.get(Repository, repo_id) is None:
+        raise HTTPException(status_code=404, detail="未找到仓库")
+    cases, metadata = build_pr_readiness_dataset(db, repo_id, include_feedback=include_feedback)
+    return {
+        "evaluation_set": metadata,
+        "cases": [case.to_canonical_dict() for case in cases],
+    }
+
+
+@router.post("/pr-readiness/run", response_model=EvalRunResponse)
+async def run_pr_readiness_evaluation(
+    payload: PRReadinessEvalRequest = PRReadinessEvalRequest(),
+    db: Session = Depends(get_db),
+    _user=Depends(require_permission("eval:read")),
+) -> EvalRunResponse:
+    if payload.repo_id is not None and db.get(Repository, payload.repo_id) is None:
+        raise HTTPException(status_code=404, detail="未找到仓库")
+    result = await run_pr_merge_readiness_eval(
+        db,
+        payload.repo_id,
+        include_feedback=payload.include_feedback,
+    )
+    eval_run = EvalRun(name=payload.name or "pr_merge_readiness", result_json=result)
     db.add(eval_run)
     db.commit()
     db.refresh(eval_run)

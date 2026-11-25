@@ -9,10 +9,11 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.core.config import settings
-from app.db.models import Base, Document, Issue, PRFile, PullRequest, Repository, WorkflowRun
+from app.db.models import AuditLog, Base, Document, Issue, PRFile, PullRequest, Repository, WorkflowRun
 from app.db.session import get_db
 from app.main import create_app
 from app.services.agents.pr_review_agent import PRReviewAgent
+from app.services.github.client import GitHubClient
 from app.services.llm.client import LLMClient
 from app.services.rag.vector_store import reset_milvus_store_cache
 
@@ -508,3 +509,235 @@ def test_acceptance_report_unverifiable_and_draft_downgrade_to_hold_while_expect
     assert ready_review["merge_recommendation"] == "建议合入"
     assert len(ready_review["acceptance_summary"]["positive_proofs"]) == 2
     assert ready_resp["evidence_summary"]["ci_status"]["state"] == "passed"
+
+
+def test_pr_comment_draft_requires_confirmation_and_executes_via_action_drafts(pr_client, monkeypatch) -> None:
+    client, SessionTesting = pr_client
+    with SessionTesting() as db:
+        repo, pr = _seed_repo_and_pr(
+            db,
+            number=91,
+            title="Drop legacy X-Internal-Bypass header and update ORM column",
+            body="Clean up internal route and add audit column.",
+            files=[
+                {
+                    "filename": "backend/app/db/models.py",
+                    "additions": 3,
+                    "deletions": 1,
+                    "patch": "@@ -55,3 +55,5 @@\n-    legacy_token = 'X-Internal-Bypass'\n+    audit_level: Mapped[str] = mapped_column(String(32), default='strict')\n",
+                },
+                {
+                    "filename": "backend/app/tests/test_models.py",
+                    "additions": 6,
+                    "deletions": 0,
+                    "patch": "@@ -1,0 +1,6 @@\n+def test_audit_level():\n+    assert True\n",
+                },
+            ],
+        )
+        db.add(
+            Document(
+                repo_id=repo.id,
+                source_type="project_doc",
+                source_id=uuid.uuid4(),
+                title="内网排障手册",
+                content="应急排障时可携带 `X-Internal-Bypass` 请求头。",
+                meta={"filename": "internal_runbook.md", "checksum": "ab12cd34ef56"},
+            )
+        )
+        db.commit()
+        pr_id = str(pr.id)
+
+    # Gate 1: Rejects before PR analysis exists
+    no_analysis_resp = client.post(
+        f"/api/pull-requests/{pr_id}/comment-draft",
+        json={"reviewer_confirmed": True},
+    )
+    assert no_analysis_resp.status_code == 400
+
+    analysis_resp = client.post(f"/api/pull-requests/{pr_id}/analyze?use_pr_snapshot=false").json()
+    analysis_id = analysis_resp["analysis_id"]
+    blocking_id = analysis_resp["result"]["blocking_findings"][0]["finding_id"]
+
+    # Gate 2: Rejects when reviewer_confirmed is False
+    unconfirmed_resp = client.post(
+        f"/api/pull-requests/{pr_id}/comment-draft",
+        json={"analysis_id": analysis_id, "reviewer_confirmed": False},
+    )
+    assert unconfirmed_resp.status_code == 400
+
+    # Gate 3: Creates risk-graded pending_confirmation ActionDraft with exact locators
+    draft_resp = client.post(
+        f"/api/pull-requests/{pr_id}/comment-draft",
+        json={
+            "analysis_id": analysis_id,
+            "reviewer_confirmed": True,
+            "confirmed_merge_recommendation": "修改后合入",
+            "confirmed_finding_ids": [blocking_id],
+            "reviewer_note": "补齐迁移脚本与内网手册同步后再合入。",
+        },
+    )
+    assert draft_resp.status_code == 200
+    draft = draft_resp.json()
+    assert draft["draft_type"] == "post_pr_review_comment"
+    assert draft["status"] == "pending_confirmation"
+    assert draft["risk_level"] == "high"
+    assert "### 阻塞问题" in draft["content"]
+    assert "### 一般建议" in draft["content"]
+    assert "### 证据不足项" in draft["content"]
+    assert "backend/app/db/models.py#L55-L59" in draft["content"]
+    assert "⚠️ 已过期资料" in draft["content"]
+
+    posted_comments: list[tuple[str, str, int, str]] = []
+
+    async def fake_create_issue_comment(self, owner: str, repo_name: str, number: int, body: str) -> dict:
+        posted_comments.append((owner, repo_name, number, body))
+        return {"id": 9001, "html_url": f"https://github.com/{owner}/{repo_name}/pull/{number}#issuecomment-9001"}
+
+    monkeypatch.setattr(GitHubClient, "create_issue_comment", fake_create_issue_comment)
+
+    confirm_resp = client.post(f"/api/action-drafts/{draft['id']}/confirm")
+    assert confirm_resp.status_code == 200
+    confirmed = confirm_resp.json()["draft"]
+    assert confirmed["status"] == "executed"
+    assert len(posted_comments) == 1
+    assert posted_comments[0][2] == 91
+
+    with SessionTesting() as db:
+        audits = db.query(AuditLog).filter(AuditLog.target_id == pr_id).all()
+        actions = {row.action for row in audits}
+        assert "pull_request.comment_draft.create" in actions
+        assert "action_draft.confirm.post_pr_review_comment" in actions
+
+
+def test_pr_feedback_persists_and_compiles_into_regression_eval_suite(pr_client) -> None:
+    client, SessionTesting = pr_client
+    with SessionTesting() as db:
+        repo, pr_clean = _seed_repo_and_pr(
+            db,
+            number=95,
+            title="Normalize webhook signature header case",
+            body="Fix case sensitivity bug.",
+            files=[
+                {
+                    "filename": "backend/app/services/webhook_sig.py",
+                    "additions": 4,
+                    "deletions": 2,
+                    "patch": "@@ -10,4 +10,6 @@\n+    header = header.lower()\n",
+                },
+                {
+                    "filename": "backend/app/tests/test_webhook_sig.py",
+                    "additions": 8,
+                    "deletions": 0,
+                    "patch": "@@ -1,0 +1,8 @@\n+def test_header_case():\n+    assert True\n",
+                },
+            ],
+        )
+        repo_id = str(repo.id)
+        pr_clean_id = str(pr_clean.id)
+
+        pr_bypass = PullRequest(
+            repo_id=repo.id,
+            number=96,
+            title="Streamline admin export endpoint",
+            body="Remove redundant dependency.",
+            state="open",
+            author="dan",
+            base_branch="main",
+            head_branch="feat/pr-96",
+        )
+        db.add(pr_bypass)
+        db.flush()
+        db.add_all(
+            [
+                PRFile(
+                    pr_id=pr_bypass.id,
+                    filename="backend/app/api/routes/admin_export.py",
+                    status="modified",
+                    additions=1,
+                    deletions=2,
+                    patch="@@ -12,4 +12,3 @@\n-def export_all(user=Depends(require_permission('settings:manage'))):\n+def export_all():\n     return dump_rows()\n",
+                ),
+                PRFile(
+                    pr_id=pr_bypass.id,
+                    filename="backend/app/tests/test_admin_export.py",
+                    status="added",
+                    additions=5,
+                    deletions=0,
+                    patch="@@ -1,0 +1,5 @@\n+def test_export(): pass\n",
+                ),
+            ]
+        )
+        db.commit()
+        pr_bypass_id = str(pr_bypass.id)
+
+    base_cases_resp = client.get(f"/api/evals/pr-regression-cases?repo_id={repo_id}")
+    assert base_cases_resp.status_code == 200
+    base_sha = base_cases_resp.json()["evaluation_set"]["sha256"]
+    assert base_cases_resp.json()["evaluation_set"]["builtin_case_count"] == 10
+    assert base_cases_resp.json()["evaluation_set"]["feedback_case_count"] == 0
+
+    # missed_issue requires ground-truth note or title
+    invalid_fb = client.post(
+        f"/api/pull-requests/{pr_bypass_id}/feedback",
+        json={"label": "missed_issue"},
+    )
+    assert invalid_fb.status_code == 422
+
+    clean_analysis = client.post(f"/api/pull-requests/{pr_clean_id}/analyze?use_pr_snapshot=false").json()
+    fb1 = client.post(
+        f"/api/pull-requests/{pr_clean_id}/feedback",
+        json={
+            "label": "useful",
+            "analysis_id": clean_analysis["analysis_id"],
+            "note": "合入判断与锚点准确",
+        },
+    )
+    assert fb1.status_code == 200
+
+    fb2 = client.post(
+        f"/api/pull-requests/{pr_clean_id}/feedback",
+        json={
+            "label": "false_positive",
+            "finding_id": "finding-1",
+            "expected_merge_recommendation": "建议合入",
+            "note": "该大小写转换不构成阻塞",
+        },
+    )
+    assert fb2.status_code == 200
+
+    fb3 = client.post(
+        f"/api/pull-requests/{pr_bypass_id}/feedback",
+        json={
+            "label": "missed_issue",
+            "missed_issue_title": "权限或认证",
+            "expected_locator": "backend/app/api/routes/admin_export.py#L12-L14",
+            "note": "导出接口移除了管理员权限守卫，必须阻断合入",
+        },
+    )
+    assert fb3.status_code == 200
+
+    listed_fb = client.get(f"/api/pull-requests/{pr_clean_id}/feedback")
+    assert listed_fb.status_code == 200
+    assert {item["label"] for item in listed_fb.json()} == {"useful", "false_positive"}
+
+    updated_cases_resp = client.get(f"/api/evals/pr-regression-cases?repo_id={repo_id}")
+    assert updated_cases_resp.status_code == 200
+    updated_meta = updated_cases_resp.json()["evaluation_set"]
+    assert updated_meta["feedback_case_count"] == 3
+    assert updated_meta["case_count"] == 13
+    assert updated_meta["sha256"] != base_sha
+
+    eval_resp = client.post(
+        "/api/evals/pr-readiness/run",
+        json={"name": "pr-regression-with-feedback", "repo_id": repo_id, "include_feedback": True},
+    )
+    assert eval_resp.status_code == 200
+    eval_result = eval_resp.json()["result"]
+    assert eval_result["dataset_sha256"] == updated_meta["sha256"]
+    assert eval_result["blocking_precision"] == 1.0
+    assert eval_result["false_blocking_rate"] == 0.0
+    assert eval_result["critical_issue_recall"] == 1.0
+    assert eval_result["citation_binding_rate"] == 1.0
+    assert eval_result["stale_doc_detection_rate"] == 1.0
+    assert eval_result["passed"] is True
+

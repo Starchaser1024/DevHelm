@@ -24,7 +24,8 @@ from app.services.evals.ragas_runner import (
     rescore_rag_result,
     run_rag_quality_eval,
 )
-from app.services.evals.suites import list_eval_suites, load_eval_suite
+from app.services.evals.suites import list_eval_suites, load_eval_suite, load_pr_readiness_suite
+from app.services.evals.pr_readiness import run_pr_merge_readiness_eval
 from app.services.evals.runner import run_basic_eval
 from app.services.rag.vector_store import reset_milvus_store_cache
 
@@ -36,8 +37,27 @@ async def test_basic_eval_runner_returns_real_metrics() -> None:
     assert result["tool_call_accuracy"] > 0
     assert result["rag_hit_rate_at_3"] == 1.0
     assert result["ci_pytest_failure_detection"] == 1.0
+    assert result["pr_blocking_precision"] == 1.0
+    assert result["pr_false_blocking_rate"] == 0.0
+    assert result["pr_critical_issue_recall"] == 1.0
+    assert result["pr_citation_binding_rate"] == 1.0
+    assert result["pr_stale_doc_detection_rate"] == 1.0
+    assert len(result["pr_dataset_sha256"]) == 64
     assert "Eval Report" in result["report_markdown"]
     assert "CI pytest failure detection" in result["report_markdown"]
+
+
+@pytest.mark.asyncio
+async def test_pr_merge_readiness_suite_is_deterministic_across_runs() -> None:
+    cases, meta = load_pr_readiness_suite(include_feedback=False)
+    assert len(cases) == 10
+    assert meta["case_count"] == 10
+
+    first = await run_pr_merge_readiness_eval(include_feedback=False)
+    second = await run_pr_merge_readiness_eval(include_feedback=False)
+    assert first["dataset_sha256"] == second["dataset_sha256"] == meta["sha256"]
+    assert first["summary_metrics"] == second["summary_metrics"]
+    assert first["passed"] is True
 
 
 def test_ragas_collections_api_imports_with_current_langchain() -> None:

@@ -11,10 +11,14 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.db.models import AnalysisResult, CodeRelation, CodeSymbol, Conversation, Document, PullRequest, Repository, User, WorkflowRun
 from app.db.session import get_db
+from app.schemas.action_drafts import ActionDraftResponse
 from app.schemas.pull_requests import (
     AcceptanceReportIngestRequest,
     AcceptanceReportResponse,
     PRAnalysisResponse,
+    PRCommentDraftRequest,
+    PRFeedbackCreateRequest,
+    PRFeedbackResponse,
     PullRequestResponse,
 )
 from app.services.agents.pr_review_agent import PRReviewAgent
@@ -22,6 +26,7 @@ from app.services.chat_memory import ContextAssembler
 from app.services.code_search import search_repository_code
 from app.services.permissions import require_permission
 from app.services.pr_acceptance import get_latest_pr_acceptance_report, ingest_pr_acceptance_report
+from app.services.pr_feedback import create_pr_comment_draft, list_pr_feedback, record_pr_feedback
 from app.services.rag.retrieval import search_similar_documents
 from app.services.worktree_manager import cleanup_pr_snapshots, prepare_pr_worktree
 
@@ -588,6 +593,57 @@ async def get_pull_request_acceptance_report(
     if report is None:
         raise HTTPException(status_code=404, detail="当前 PR 尚未关联行为验收报告")
     return report
+
+
+@router.post("/pull-requests/{pr_id}/comment-draft", response_model=ActionDraftResponse)
+async def post_pull_request_comment_draft(
+    pr_id: UUID,
+    payload: PRCommentDraftRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_permission("draft:create")),
+) -> ActionDraftResponse:
+    pr = db.get(PullRequest, pr_id)
+    if pr is None:
+        raise HTTPException(status_code=404, detail="未找到 PR")
+    try:
+        draft = await create_pr_comment_draft(db, pr, payload, user=user)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return draft
+
+
+@router.post("/pull-requests/{pr_id}/feedback", response_model=PRFeedbackResponse)
+async def post_pull_request_feedback(
+    pr_id: UUID,
+    payload: PRFeedbackCreateRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_permission("repo:read")),
+) -> PRFeedbackResponse:
+    pr = db.query(PullRequest).options(selectinload(PullRequest.files), selectinload(PullRequest.review_comments)).filter(PullRequest.id == pr_id).one_or_none()
+    if pr is None:
+        raise HTTPException(status_code=404, detail="未找到 PR")
+    _query, context, _counts = _build_pr_analysis_context(db, pr)
+    return record_pr_feedback(
+        db,
+        pr,
+        payload,
+        pr_payload=_pr_payload(pr),
+        context_snapshot=context,
+        user=user,
+    )
+
+
+@router.get("/pull-requests/{pr_id}/feedback", response_model=list[PRFeedbackResponse])
+async def get_pull_request_feedback(
+    pr_id: UUID,
+    db: Session = Depends(get_db),
+) -> list[PRFeedbackResponse]:
+    pr = db.get(PullRequest, pr_id)
+    if pr is None:
+        raise HTTPException(status_code=404, detail="未找到 PR")
+    return list_pr_feedback(db, pr_id)
 
 
 @router.post("/pull-requests/{pr_id}/analyze/stream")

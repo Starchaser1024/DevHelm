@@ -9,6 +9,12 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.db.models import Document, Repository
+from app.services.evals.pr_readiness import (
+    PR_READINESS_SUITE_ID,
+    PRReadinessEvalCase,
+    build_pr_readiness_dataset,
+    compile_pr_feedback_regression_cases,
+)
 from app.services.evals.ragas_runner import RagEvalCase
 
 
@@ -195,3 +201,26 @@ def load_eval_suite(
         metadata["case_count"] = len(cases)
         return LoadedEvalSuite(metadata=metadata, cases=cases)
     raise ValueError(f"未找到评测集：{suite_id}")
+
+
+def load_pr_readiness_suite(
+    db: Session | None = None,
+    repo_id: Any = None,
+    *,
+    include_feedback: bool = True,
+) -> tuple[list[PRReadinessEvalCase], dict[str, Any]]:
+    return build_pr_readiness_dataset(db, repo_id, include_feedback=include_feedback)
+
+
+__all__ = [
+    "AUTO_SMOKE_SUITE_ID",
+    "DEFAULT_SUITE_DIR",
+    "LoadedEvalSuite",
+    "PRReadinessEvalCase",
+    "PR_READINESS_SUITE_ID",
+    "build_pr_readiness_dataset",
+    "compile_pr_feedback_regression_cases",
+    "list_eval_suites",
+    "load_eval_suite",
+    "load_pr_readiness_suite",
+]

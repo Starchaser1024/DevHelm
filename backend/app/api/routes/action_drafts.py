@@ -37,7 +37,7 @@ async def _execute_github_draft(db: Session, draft: ActionDraft, repo: Repositor
     client = GitHubClient(token=token, base_url=repo.api_base_url)
     draft_type = draft.draft_type.lower()
     issue_number = _target_number(db, draft)
-    if draft_type in {"issue_comment", "pr_comment", "comment"}:
+    if draft_type in {"issue_comment", "pr_comment", "post_pr_review_comment", "comment"}:
         if issue_number is None:
             raise RuntimeError("评论草稿缺少 issue/pr number")
         return await client.create_issue_comment(repo.owner, repo.name, issue_number, draft.content)
