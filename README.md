@@ -11,8 +11,9 @@ DevHelm 是面向软件研发团队的全栈 AI 工程协作平台，连接真�
 - **`SKILL.md` 渐进式技能运行时（Skill Runtime）**：常驻提示词仅注入轻量技能目录摘要；命中显式指定或语义触发条件后才按需加载完整 `SKILL.md` 指令与受限参考资源。显式激活的 Skill 强制执行工具白名单（Tool Allowlist）契约校验，并将版本号、激活原因、指令 SHA-256 摘要与 `skill_validation` 结果写入事件轨迹。
 - **分层上下文压缩与双轨记忆投影**：严格分离持久化完整转录（`MessageStore.timeline`）与模型活跃上下文视图（`MessageStore.recent`）。随上下文窗口压力递增，依次执行 Microcompact 旧工具输出裁剪、`ProgressiveContextManager` 多阶段摘要边界插入（保留关键事实与工作文件/工具 Rehydration 状态）以及 `SessionSealer` 会话封存；压缩后的任意历史原文仍可通过 MCP 只读工具（`devhelm_get_thread_context`、`devhelm_read_session_events`）按偏移量精确回查。
 - **严格数据边界的混合 RAG（PostgreSQL + Milvus + Qwen Rerank）**：仅对跨来源复用的非结构化知识（Issue 描述、PR 讨论、脱敏失败 CI 日志、架构文档、上传资料、已确认长期记忆）建立向量与关键词双路索引；实时源码统一走 `workspace.*` 工作区词法/文件工具，实时状态与团队成员走关系库查询。对话采用“调用前 `ContextAssembler` 预检索 + 推理期 `rag.search_similar_documents` 查询改写与多轮交叉核验”的混合范式。
-- **人机协同安全写护栏（`SafetyAgent` & `ActionDraft`）**：所有潜在外部写操作（创建 Issue、发布评论、外发周报）一律拦截为带风险分级与审计日志的 `ActionDraft`，必须经人工确认后方可执行，杜绝模型越权直接写回 GitHub。
-- **双层自动化评测体系（Offline Eval + RAGAS 0.4）**：离线基准覆盖 Issue 分类、PR 风险覆盖率、RAG 召回命中率、工具 Schema 就绪度与结构化输出契约；在线基准在隔离会话中真实驱动生产 `ChatAgent`，基于 Ragas 0.4 计算五维语义与目标达成指标，支持异常评分单点重试与同基线 Hash 回归对比。
+- **可验证的 PR 合入就绪度审查闭环（`PRReviewAgent` & `change-verifier` 联动）**：围绕“当前 PR 是否具备安全合入条件”，将审查结论划分为**阻塞问题（`blocking_findings`）**、**一般建议（`advisory_findings`）**与**证据不足项（`evidence_gaps`）**三类桶，每条发现强制绑定行级 Diff、CI 运行记录、关联 Issue、带过期检测（`stale`）的项目文档或 `change-verifier`（`report_version: 1`）HTTP 行为对比验收锚点；审查人勾选确认后方可生成待审批的 `post_pr_review_comment` 安全草稿，并支持在线标注“有用 / 误报 / 遗漏”反馈自动沉淀为回归评测用例。
+- **人机协同安全写护栏（`SafetyAgent` & `ActionDraft`）**：所有潜在外部写操作（创建 Issue、发布 PR 审查评论、外发周报）一律拦截为带风险分级与审计日志的 `ActionDraft`，必须经人工确认后方可执行，杜绝模型越权直接写回 GitHub。
+- **双层自动化评测体系（Offline Eval + RAGAS 0.4）**：离线基准覆盖 Issue 分类、PR 合入就绪度（阻塞精确率、误阻断率、关键风险召回率、证据锚点绑定率、过期资料检出率）、RAG 召回命中率、工具 Schema 就绪度与结构化输出契约；在线基准在隔离会话中真实驱动生产 `ChatAgent`，基于 Ragas 0.4 计算五维语义与目标达成指标，支持异常评分单点重试与同基线 Hash 回归对比。
 
 ## 系统架构
 
@@ -211,6 +212,26 @@ GET  /api/rag/{repo_id}/status
 POST /api/rag/{repo_id}/search
 POST /api/rag/{repo_id}/ask
 POST /api/rag/{repo_id}/reindex
+```
+
+## PR 合入就绪度审查与行为验收联动
+
+访问 `http://localhost:3000/pull-requests` 可进入 PR 合入就绪度工作流：
+
+- **三桶证据分级与陈旧资料识别**：自动提取统一 Diff 行号锚点（如 `path#L42-L58`）、CI 运行标识、关联 Issue 与知识库文档摘要；若项目文档引用了本次 PR 已移除的配置或接口且未同步更新，自动标记 `stale=true` 并归入 `evidence_gaps` 触发暂缓合入。
+- **跨工具 HTTP 行为对比验收（`change-verifier`）**：通过 `POST /api/pull-requests/{pr_id}/acceptance-report` 导入 `report_version: 1` 的脱敏对比报告。`regression` 与 `not_met` 自动升级为带 `check:<id>` 锚点的 P1 阻塞问题；草稿规则（`draft`）或 `unverifiable` 检查项记入 `evidence_gaps` 并将「建议合入」降级为「暂缓」；已确认的 `expected_change` 与 `satisfied` 作为正向行为证明挂载。
+- **确认门禁与反馈闭环**：审查人勾选核实的发现项并确认合入结论后，调用 `POST /api/pull-requests/{pr_id}/comment-draft` 生成待二次审批的 `ActionDraft`；页面内标注的 `useful` / `false_positive` / `missed_issue` 反馈会持久化并自动编译进 `POST /api/evals/pr-readiness/run` 确定性回归评测集（带 SHA-256 指纹）。
+
+```text
+POST /api/pull-requests/{pr_id}/analyze
+GET  /api/pull-requests/{pr_id}/latest-analysis
+POST /api/pull-requests/{pr_id}/acceptance-report
+GET  /api/pull-requests/{pr_id}/acceptance-report
+POST /api/pull-requests/{pr_id}/comment-draft
+POST /api/pull-requests/{pr_id}/feedback
+GET  /api/pull-requests/{pr_id}/feedback
+GET  /api/evals/pr-regression-cases
+POST /api/evals/pr-readiness/run
 ```
 
 ## 评测体系（Offline Suite & RAGAS 0.4）

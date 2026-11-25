@@ -9,6 +9,7 @@ import styles from "./app-shell.module.css";
 
 const navItems = [
   { href: "/", label: "工作台" },
+  { href: "/pull-requests", label: "PR 审查" },
   { href: "/knowledge", label: "项目知识" },
   { href: "/rag", label: "RAG 工作室" },
   { href: "/repos", label: "仓库" },
