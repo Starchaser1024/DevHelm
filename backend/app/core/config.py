@@ -79,6 +79,8 @@ class Settings(BaseSettings):
     upload_dir: str = ".data/uploads"
 
     token_encryption_key: str = "change-me-in-local-dev"
+    api_auth_token: str | None = None
+    auth_demo_fallback_enabled: bool = True
     demo_mode: bool = True
     github_webhook_secret: str | None = None
     feishu_feedback_webhook_url: str | None = None

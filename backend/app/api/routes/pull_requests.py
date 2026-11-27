@@ -493,7 +493,11 @@ async def _pr_analysis_sse(pr_id: UUID, conversation_id: UUID | None, db: Sessio
         yield _encode_sse("error", {"message": f"分析失败：{exc}"})
 
 
-@router.get("/repos/{repo_id}/pull-requests", response_model=list[PullRequestResponse])
+@router.get(
+    "/repos/{repo_id}/pull-requests",
+    response_model=list[PullRequestResponse],
+    dependencies=[Depends(require_permission("repo:read"))],
+)
 async def list_pull_requests(repo_id: UUID, db: Session = Depends(get_db)) -> list[PullRequest]:
     return (
         db.query(PullRequest)
@@ -504,7 +508,11 @@ async def list_pull_requests(repo_id: UUID, db: Session = Depends(get_db)) -> li
     )
 
 
-@router.get("/pull-requests/{pr_id}", response_model=PullRequestResponse)
+@router.get(
+    "/pull-requests/{pr_id}",
+    response_model=PullRequestResponse,
+    dependencies=[Depends(require_permission("repo:read"))],
+)
 async def get_pull_request(pr_id: UUID, db: Session = Depends(get_db)) -> PullRequest:
     pr = db.query(PullRequest).options(selectinload(PullRequest.files), selectinload(PullRequest.review_comments)).filter(PullRequest.id == pr_id).one_or_none()
     if pr is None:
@@ -512,7 +520,11 @@ async def get_pull_request(pr_id: UUID, db: Session = Depends(get_db)) -> PullRe
     return pr
 
 
-@router.post("/pull-requests/{pr_id}/analyze", response_model=PRAnalysisResponse)
+@router.post(
+    "/pull-requests/{pr_id}/analyze",
+    response_model=PRAnalysisResponse,
+    dependencies=[Depends(require_permission("agent:run"))],
+)
 async def analyze_pull_request(
     pr_id: UUID,
     conversation_id: UUID | None = Query(default=None),
@@ -537,7 +549,11 @@ async def analyze_pull_request(
     )
 
 
-@router.get("/pull-requests/{pr_id}/latest-analysis", response_model=PRAnalysisResponse)
+@router.get(
+    "/pull-requests/{pr_id}/latest-analysis",
+    response_model=PRAnalysisResponse,
+    dependencies=[Depends(require_permission("repo:read"))],
+)
 async def get_latest_pull_request_analysis(
     pr_id: UUID,
     db: Session = Depends(get_db),
@@ -581,7 +597,11 @@ async def post_pull_request_acceptance_report(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.get("/pull-requests/{pr_id}/acceptance-report", response_model=AcceptanceReportResponse)
+@router.get(
+    "/pull-requests/{pr_id}/acceptance-report",
+    response_model=AcceptanceReportResponse,
+    dependencies=[Depends(require_permission("repo:read"))],
+)
 async def get_pull_request_acceptance_report(
     pr_id: UUID,
     db: Session = Depends(get_db),
@@ -635,7 +655,11 @@ async def post_pull_request_feedback(
     )
 
 
-@router.get("/pull-requests/{pr_id}/feedback", response_model=list[PRFeedbackResponse])
+@router.get(
+    "/pull-requests/{pr_id}/feedback",
+    response_model=list[PRFeedbackResponse],
+    dependencies=[Depends(require_permission("repo:read"))],
+)
 async def get_pull_request_feedback(
     pr_id: UUID,
     db: Session = Depends(get_db),
@@ -646,7 +670,7 @@ async def get_pull_request_feedback(
     return list_pr_feedback(db, pr_id)
 
 
-@router.post("/pull-requests/{pr_id}/analyze/stream")
+@router.post("/pull-requests/{pr_id}/analyze/stream", dependencies=[Depends(require_permission("agent:run"))])
 async def analyze_pull_request_stream(
     pr_id: UUID,
     conversation_id: UUID | None = Query(default=None),
@@ -655,7 +679,7 @@ async def analyze_pull_request_stream(
     return StreamingResponse(_pr_analysis_sse(pr_id, conversation_id, db), media_type="text/event-stream")
 
 
-@router.post("/pull-requests/{pr_id}/snapshot")
+@router.post("/pull-requests/{pr_id}/snapshot", dependencies=[Depends(require_permission("agent:run"))])
 async def prepare_pull_request_snapshot(pr_id: UUID, db: Session = Depends(get_db)) -> dict:
     pr = db.query(PullRequest).options(selectinload(PullRequest.files)).filter(PullRequest.id == pr_id).one_or_none()
     if pr is None:
@@ -663,7 +687,7 @@ async def prepare_pull_request_snapshot(pr_id: UUID, db: Session = Depends(get_d
     return _prepare_pr_snapshot_context(db, pr, enabled=True)
 
 
-@router.post("/pull-requests/{pr_id}/worktree")
+@router.post("/pull-requests/{pr_id}/worktree", dependencies=[Depends(require_permission("agent:run"))])
 async def prepare_pull_request_worktree(pr_id: UUID, db: Session = Depends(get_db)) -> dict:
     pr = db.query(PullRequest).options(selectinload(PullRequest.files)).filter(PullRequest.id == pr_id).one_or_none()
     if pr is None:
@@ -671,7 +695,7 @@ async def prepare_pull_request_worktree(pr_id: UUID, db: Session = Depends(get_d
     return _prepare_pr_snapshot_context(db, pr, enabled=True)
 
 
-@router.post("/repos/{repo_id}/pr-snapshots/cleanup")
+@router.post("/repos/{repo_id}/pr-snapshots/cleanup", dependencies=[Depends(require_permission("repo:sync"))])
 async def cleanup_pull_request_snapshots(
     repo_id: UUID,
     max_age_hours: int = Query(default=168, ge=1, le=24 * 90),
@@ -683,7 +707,7 @@ async def cleanup_pull_request_snapshots(
     return cleanup_pr_snapshots(db, repo, max_age_hours=max_age_hours)
 
 
-@router.post("/pull-requests/{pr_id}/review-checklist")
+@router.post("/pull-requests/{pr_id}/review-checklist", dependencies=[Depends(require_permission("agent:run"))])
 async def review_checklist(pr_id: UUID, db: Session = Depends(get_db)) -> dict:
     response = await analyze_pull_request(pr_id, db=db)
     return {"pr_id": str(pr_id), "checklist": response.result.review_checklist}

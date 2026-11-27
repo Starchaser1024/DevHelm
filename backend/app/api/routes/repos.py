@@ -11,13 +11,14 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from app.db.models import ActionDraft, AgentRun, AgentTaskRun, AgentWorkflowRun, AnalysisResult, AuditLog, ChatFeedback, ChatMessage, ChatSession, CodeRelation, CodeSymbol, Conversation, ConversationMemory, Document, EvidenceItem, Issue, KnowledgeBaseConfig, KnowledgeGraphEdge, KnowledgeSourceDocument, MemoryCandidate, PRFile, PRReviewComment, ProjectIndexState, PullRequest, RecallEvent, Repository, RetrievalTestRun, ThreadMemory, WorkflowRun, Workspace
+from app.db.models import ActionDraft, AgentRun, AgentTaskRun, AgentWorkflowRun, AnalysisResult, AuditLog, ChatFeedback, ChatMessage, ChatSession, CodeRelation, CodeSymbol, Conversation, ConversationMemory, Document, EvidenceItem, Issue, KnowledgeBaseConfig, KnowledgeGraphEdge, KnowledgeSourceDocument, MemoryCandidate, PRFile, PRReviewComment, ProjectIndexState, PullRequest, RecallEvent, Repository, RetrievalTestRun, ThreadMemory, User, WorkflowRun, Workspace
 from app.db.session import get_db
 from app.schemas.repos import RepoConnectRequest, RepoConnectResponse, RepoResponse, RepoSyncRequest, RepoSyncResponse
 from app.core.config import settings
 from app.core.security import encrypt_token
 from app.services.github.client import GitHubClient
 from app.services.code_analysis import sync_repository_code_analysis_by_id
+from app.services.permissions import require_permission, write_audit_log
 from app.services.rag.vector_store import delete_milvus_documents
 from app.services.repos_sync import sync_repository
 
@@ -155,7 +156,12 @@ def _clone_target_from_parent(raw_parent: str, repo_name: str) -> Path:
 
 
 @router.post("/connect", response_model=RepoConnectResponse)
-async def connect_repo(payload: RepoConnectRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)) -> RepoConnectResponse:
+async def connect_repo(
+    payload: RepoConnectRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: User | None = Depends(require_permission("repo:sync")),
+) -> RepoConnectResponse:
     local_path = _clean_text(payload.local_path)
     clone_parent_dir = _clean_text(payload.clone_parent_dir)
     owner = _clean_text(payload.owner)
@@ -222,6 +228,16 @@ async def connect_repo(payload: RepoConnectRequest, background_tasks: Background
     repo.local_path = str(checkout_path) if checkout_path else None
     repo.checkout_mode = checkout_mode
     repo.github_id = repo_data.get("id")
+    db.flush()
+    write_audit_log(
+        db,
+        user=user if isinstance(user, User) else None,
+        repo_id=repo.id,
+        action="repository.connect",
+        target_type="repository",
+        target_id=str(repo.id),
+        request_json={"full_name": repo.full_name, "provider": repo.provider, "demo_mode": effective_demo_mode},
+    )
     db.commit()
     db.refresh(repo)
     sync_result: RepoSyncResponse | None = None
@@ -263,7 +279,7 @@ async def connect_repo(payload: RepoConnectRequest, background_tasks: Background
     )
 
 
-@router.get("", response_model=list[RepoResponse])
+@router.get("", response_model=list[RepoResponse], dependencies=[Depends(require_permission("repo:read"))])
 async def list_repos(db: Session = Depends(get_db)) -> list[Repository]:
     return (
         db.query(Repository)
@@ -279,16 +295,28 @@ async def sync_repo(
     payload: RepoSyncRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
+    user: User | None = Depends(require_permission("repo:sync")),
 ) -> RepoSyncResponse:
     repo = db.get(Repository, repo_id)
     if repo is None:
         raise HTTPException(status_code=404, detail="未找到仓库")
     result = await sync_repository(db, repo, payload)
+    write_audit_log(
+        db,
+        user=user if isinstance(user, User) else None,
+        repo_id=repo.id,
+        action="repository.sync",
+        target_type="repository",
+        target_id=str(repo.id),
+        request_json=payload.model_dump(mode="json"),
+        result_json=result.model_dump(mode="json"),
+    )
+    db.commit()
     background_tasks.add_task(sync_repository_code_analysis_by_id, repo.id)
     return result
 
 
-@router.post("/{repo_id}/select")
+@router.post("/{repo_id}/select", dependencies=[Depends(require_permission("repo:read"))])
 async def select_repo(repo_id: UUID, db: Session = Depends(get_db)) -> dict:
     repo = db.get(Repository, repo_id)
     if repo is None:
@@ -298,7 +326,7 @@ async def select_repo(repo_id: UUID, db: Session = Depends(get_db)) -> dict:
     return {"repo_id": str(repo.id), "full_name": repo.full_name, "selected": True}
 
 
-@router.delete("/{repo_id}")
+@router.delete("/{repo_id}", dependencies=[Depends(require_permission("settings:manage"))])
 async def delete_repo(repo_id: UUID, db: Session = Depends(get_db)) -> dict:
     repo = db.get(Repository, repo_id)
     if repo is None:
@@ -448,7 +476,7 @@ async def delete_repo(repo_id: UUID, db: Session = Depends(get_db)) -> dict:
     }
 
 
-@router.get("/{repo_id}/sync-status")
+@router.get("/{repo_id}/sync-status", dependencies=[Depends(require_permission("repo:read"))])
 async def sync_status(repo_id: UUID, db: Session = Depends(get_db)) -> dict:
     repo = db.get(Repository, repo_id)
     if repo is None:

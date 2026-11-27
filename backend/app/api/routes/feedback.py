@@ -5,11 +5,11 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.db.models import AgentRun, ChatFeedback, ChatMessage, ChatSession, Conversation, Repository
+from app.db.models import AgentRun, ChatFeedback, ChatMessage, ChatSession, Conversation, Repository, User
 from app.db.session import get_db
 from app.schemas.feedback import ChatFeedbackCreate, ChatFeedbackResponse, ChatFeedbackReview
 from app.services.feedback_notifications import send_negative_feedback_notification
-from app.services.permissions import ensure_demo_user
+from app.services.permissions import ensure_demo_user, require_permission
 
 router = APIRouter()
 
@@ -160,7 +160,11 @@ async def list_feedback(
 
 
 @router.post("", response_model=ChatFeedbackResponse)
-async def create_feedback(payload: ChatFeedbackCreate, db: Session = Depends(get_db)) -> ChatFeedback:
+async def create_feedback(
+    payload: ChatFeedbackCreate,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(require_permission("repo:read")),
+) -> ChatFeedback:
     repo = db.get(Repository, payload.repo_id)
     conversation = db.get(Conversation, payload.conversation_id)
     if repo is None or conversation is None or conversation.repo_id != repo.id:
@@ -168,7 +172,7 @@ async def create_feedback(payload: ChatFeedbackCreate, db: Session = Depends(get
     message = _message_or_404(db, payload)
     run_id = _run_id_from_message(message)
     run = db.get(AgentRun, run_id) if run_id else None
-    reporter = ensure_demo_user(db)
+    reporter = current_user if isinstance(current_user, User) else ensure_demo_user(db)
 
     feedback = db.query(ChatFeedback).filter(ChatFeedback.assistant_message_id == message.id).one_or_none()
     notify = payload.rating == "unhelpful" and (feedback is None or feedback.rating != "unhelpful" or feedback.notified_at is None)
