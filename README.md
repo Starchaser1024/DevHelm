@@ -170,13 +170,23 @@ npm run dev
 
 ### 3. 本地无外部依赖快速验证（可选）
 
-如果希望在未启动 Docker / Milvus 或未配置 `LLM_API_KEY` 的环境下快速体验工作台界面、SQLite 存储、文档切片与关键词检索降级链路，可在 Windows PowerShell 执行：
+如果希望在未启动 Docker / Milvus 或未配置 `LLM_API_KEY` 的环境下快速体验工作台界面、SQLite 存储、PR 合入就绪度审查、文档切片与关键词检索降级链路，可在 Linux / macOS / Windows 直接使用跨平台启动脚本（激活后端虚拟环境后执行）：
+
+```bash
+# 初始化本地 SQLite + 幂等注入演示仓库/Issue/PR/CI/文档并启动后端（默认 127.0.0.1:8000）
+python scripts/dev_quickstart.py
+
+# 仅执行进程内健康检查、演示仓库与 PR 合入就绪度回归自检（不启动常驻服务）
+python scripts/dev_quickstart.py --verify-only
+```
+
+Windows PowerShell 下若希望一键同时后台拉起前后端进程，也可继续使用：
 
 ```powershell
 .\scripts\start_rag.ps1
 ```
 
-该脚本显式使用 SQLite、`deterministic` 测试向量与启发式重排，并将向量状态标记为 `degraded`；已配置 `LLM_API_KEY` 时可附加 `-UseConfiguredLLM` 启用模型生成。完整混合检索与向量索引重建请使用 Docker Compose 启动 PostgreSQL 与 Milvus。
+上述快速启动流程显式使用本地 SQLite、`deterministic` 测试向量与本地启发式重排，并将向量状态标记为 `degraded`；已配置 `LLM_API_KEY` 时可附加 `--use-configured-llm`（PowerShell 脚本对应 `-UseConfiguredLLM`）启用模型生成。完整混合检索与向量索引重建请使用 Docker Compose 启动 PostgreSQL 与 Milvus。
 
 ## 数据库迁移（Alembic）
 
